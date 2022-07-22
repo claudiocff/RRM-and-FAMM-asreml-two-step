@@ -1,0 +1,516 @@
+---
+title: "Two Stage analysis using RRM"
+output: html_notebook
+---
+
+```{r}
+rm(list = ls())
+library(ggplot2)
+library(asreml)
+library(tidyverse)
+library(dplyr)
+library(reshape2)
+library(lattice)
+library(magick)
+library(cowplot)
+library(orthopolynom)
+library(viridis)
+library(factoextra)
+library(FactoMineR)
+library(cluster)
+library(reshape2)
+library(psych)
+library(cowplot)
+library(gghighlight)
+library(ggrepel)
+library(pracma)
+library(chillR)
+library(gganimate)
+library(inflection)
+library(pastecs)
+```
+
+```{r}
+setwd("D:\\Doutorado\\Thesis Forage")
+```
+
+
+```{r}
+df_alfafa = read.csv("alfalfa.csv",
+                     header = TRUE,
+                     sep = ";")
+```
+
+
+```{r}
+df_alfafa = transform(df_alfafa, 
+                      Row = factor(Row),
+                      Column = factor(Column),
+                      Harvest = factor(Harvest),
+                      Family = factor(Family))
+df_alfafa$X = as.numeric(df_alfafa$Column)
+df_alfafa$Y = as.numeric(df_alfafa$Row)
+plot(df_alfafa$X,df_alfafa$Y)
+```
+
+
+
+```{r}
+#Correcting the BLUES by Spatial trends
+pred = data.frame()
+for(i in 1:11){
+  spats = SpATS(response = "DMY", 
+                 spatial = ~ PSANOVA(X, 
+                                     Y, 
+                                     nseg = c(32,14),                       
+                                     degree = c(3,3), 
+                                     pord = c(2,2)),
+                 genotype.as.random = FALSE,
+                 genotype = "Family",
+                 fixed = ~ 1,
+                 random = ~ Row + Column,
+                 data = df_alfafa[df_alfafa$Harvest == i,],
+                 control = list(tolerance = 1e-03))
+  pred_spats = predict(spats,
+                        which = "Family",
+                        return.vcov.matrix = TRUE,
+                        predFixed = "conditional")
+  
+  vcov = attr(pred_spats, "vcov")
+  vcov = as.matrix(vcov)
+  W = diag(vcov)
+  pred_spats$W = 1/W
+  pred_spats$Harvest = i
+  pred = rbind(pred,pred_spats)
+}
+
+pred = data.frame(ID = pred$Family,
+                  Harvest = pred$Harvest,
+                  DMY = pred$predicted.values,
+                  W = pred$W)
+
+pred$Days = NA
+
+pred[pred$Harvest == 1,]$Days = 0
+pred[pred$Harvest == 2,]$Days = 39
+pred[pred$Harvest == 3,]$Days = 66
+pred[pred$Harvest == 4,]$Days = 94
+pred[pred$Harvest == 5,]$Days = 120
+pred[pred$Harvest == 6,]$Days = 150
+pred[pred$Harvest == 7,]$Days = 193
+pred[pred$Harvest == 8,]$Days = 220
+pred[pred$Harvest == 9,]$Days = 265
+pred[pred$Harvest == 10,]$Days = 312
+pred[pred$Harvest == 11,]$Days = 347
+```
+
+
+________________________________________RANDOM REGRESSION MODEL__________________________________________
+
+
+```{r}
+pred$ID = as.factor(pred$ID)
+pred$Harvest = as.factor(pred$Harvest)
+```
+
+
+
+```{r}
+#Defyning the fixed polynomial degree
+ggplot(data = pred, aes(x = Days, y = DMY))+
+  geom_smooth(method = "loess", se = FALSE)+
+  theme_bw()
+#we have two curvature in the plot, so the polynomial degree will be 3.
+```
+
+
+
+```{r}
+pred = drop_na(pred)
+rrm_1 = asreml(DMY ~ -1 +leg(Days,3),
+                  random = ~  corgh(leg(Days,1)):ID,
+                  family = asr_gaussian(link = "identity", dispersion = 1),
+                  weights = W,
+                  maxit = 50,
+                  data = pred)
+summary(rrm_1)$aic
+
+rrm_2 = asreml(DMY ~ -1 +leg(Days,3),
+                  random = ~  corgh(leg(Days,2)):ID,
+                  family = asr_gaussian(link = "identity", dispersion = 1),
+                  weights = W,
+                  maxit = 50,
+                  data = pred)
+summary(rrm_2)$aic
+
+rrm_3 = asreml(DMY ~ -1 +leg(Days,3),
+                  random = ~  corgh(leg(Days,3)):ID,
+                  family = asr_gaussian(link = "identity", dispersion = 1),
+                  weights = W,
+                  maxit = 50,
+                  data = pred)
+rrm_3 = update.asreml(rrm_3)
+summary(rrm_3)$aic
+```
+
+
+```{r}
+#Chosen model
+summary(rrm_3)$varcomp
+```
+
+```{r}
+cor_mat = matrix(c(1,-2.224390e-01,7.594890e-01,2.743021e-02,
+                  -2.224390e-01,1,-6.088864e-01,-7.369141e-02,
+                   7.594890e-01,-6.088864e-01,1,-6.301199e-01,
+                   2.743021e-02,-7.369141e-02,-6.301199e-01,1),4,4)
+var_mat = sqrt(diag(c(3.436541e+05,1.011183e+05,1.962703e+04,2.930273e+03)))
+```
+
+
+```{r}
+#getting the varinace-covariance matrix between coefficients 
+K = var_mat%*%cor_mat%*%var_mat
+```
+
+```{r}
+Gradient = c(unique(pred$Days))
+Gradient_smooth = c(0:347)
+```
+
+```{r}
+#Gradient matrix
+stdcov = function(t, n, tmax, tmin){
+    if(missing(tmax)) {
+      tmax <- t[which.max(t)]
+    }
+        if(missing(tmin)) {
+            tmin <- t[which.min(t)]
+        }
+    
+    N <- n+1
+    M <- matrix(0, nrow=length(t), ncol=N)
+        a <- -1 + 2*(t-tmin)/(tmax - tmin)
+        M[,1] <- 1
+    
+    for (i in 2:N){
+        M[,i] <- a^(i-1)
+    }
+    
+    return(M)
+}
+```
+
+
+```{r}
+Har = stdcov(Gradient,3,max(Gradient),min(Gradient))
+Har_fixed = stdcov(Gradient,3,max(Gradient),min(Gradient))
+Har_smooth = stdcov(Gradient_smooth,3,max(Gradient_smooth),min(Gradient_smooth))
+Har_smooth_fixed = stdcov(Gradient_smooth,3,max(Gradient_smooth),min(Gradient_smooth))
+```
+
+
+```{r}
+legendre.polynomials(n = 3, normalized = TRUE)#Generating the normalized legendre polinomials
+```
+
+```{r}
+###Coefficient matrix#######
+lambda_fixed = matrix(c(0.7071068,0,0,0,
+                  0,1.224745,0,0,
+                  -0.7905694,0,2.371708,0,
+                  0,-2.806243,0,4.677072),4,4,byrow = TRUE)
+
+lambda = matrix(c(0.7071068,0,0,0,
+                  0,1.224745,0,0,
+                  -0.7905694,0,2.371708,0,
+                  0,-2.806243,0,4.677072),4,4,byrow = TRUE)
+```
+
+
+
+```{r}
+phi = Har%*%t(lambda)
+phi_fixed = Har_fixed%*%t(lambda_fixed)
+
+phi_smooth = Har_smooth%*%t(lambda)
+phi_fixed_smooth = Har_smooth_fixed%*%t(lambda_fixed)
+```
+
+
+```{r}
+var.cov.G = phi%*%K%*%t(phi) #Variance-covariance matrix
+corG = cov2cor(var.cov.G)
+corG[corG >1] = 1.0000
+mean(corG[upper.tri(corG)])
+sd(corG[upper.tri(corG)])
+```
+
+```{r}
+cor_melt = melt(corG)
+```
+
+```{r}
+ggplot(cor_melt, aes(x = factor(Var1), y = factor(Var2), fill = value, label = round(value,2)))+
+  geom_tile()+
+  geom_text()+
+  scale_fill_viridis(alpha = 0.7, option = "C")+
+  xlab("Harvest")+
+  ylab("Harvest")+
+  guides(fill = guide_legend(title="Genetic Correlation"))+
+  theme_bw()
+```
+
+
+```{r}
+fixed = as.data.frame(summary(mod_spats, coef = TRUE)$coef.fixed)
+
+BLUP = as.data.frame(summary(mod_spats, coef = TRUE)$coef.random)
+BLUP[order(BLUP$solution,decreasing = TRUE),]
+```
+
+```{r}
+BLUP = BLUP[grepl("ID", rownames(BLUP), fixed = TRUE), ] #Genotypes rgression coefficient
+Coef_0 = as.data.frame(BLUP[1:182,])
+Coef_1 = as.data.frame(BLUP[183:364,])
+Coef_2 = as.data.frame(BLUP[365:546,])
+Coef_3 = as.data.frame(BLUP[547:nrow(BLUP),])
+
+Coefs = cbind(Coef_0$solution,
+              Coef_0$std.error, 
+              Coef_1$solution,
+              Coef_1$std.error,
+              Coef_2$solution,
+              Coef_2$std.error,
+              Coef_3$solution,
+              Coef_3$std.error)
+
+Coefs = as.data.frame(Coefs)
+Coefs$Genotype = rownames(Coef_0)
+colnames(Coefs) = c("Coef_0",
+                    "std_0",
+                    "Coef_1",
+                    "std_1",
+                    "Coef_2",
+                    "std_2",
+                    "Coef_3",
+                    "std_3",
+                    "Genotype")
+
+
+Coefs = Coefs[order(Coefs$Genotype),]
+
+
+Coefs$Genotype = levels(pred$ID)[-181]
+
+Coefs$Coef_0 = Coefs$Coef_0
+Coefs$Coef_1 = Coefs$Coef_1
+Coefs$Coef_2 = Coefs$Coef_2
+Coefs$Coef_3 = Coefs$Coef_3
+```
+
+```{r}
+fixed
+Coef_g = cbind(Coefs$Coef_0,Coefs$Coef_1,Coefs$Coef_2,Coefs$Coef_3)
+Coef_fix = cbind(2460.5705,-674.0311,837.1927,252.3738)
+```
+
+```{r}
+Mean_curve = Coef_fix%*%t(phi_fixed_smooth)
+ID_curve = Coef_g%*%t(phi_smooth)
+```
+
+
+
+```{r}
+##Equation 13
+J = matrix(1,182,1)
+ID_curve = J%*%Coef_fix%*%t(phi_fixed_smooth)+Coef_g%*%t(phi_smooth)
+row.names(ID_curve) = levels(pred$ID)[-181]
+ID_curve_melt = melt(ID_curve)
+```
+
+
+```{r}
+ggplot(ID_curve_melt, aes(x = Var2, y = value, group = Var1, color = Var1))+
+  geom_line()+
+  guides(color = FALSE)+
+  gghighlight(Var1 == "UF2015"|
+              Var1 == "B_805"|
+              Var1 == "FL99"|
+              Var1 == "42F"|
+              Var1 == "15F"|
+              Var1 == "33_H"|
+              Var1 == "114F"|
+              Var1 == "33F"|
+              Var1 == "13F"|
+              Var1 == "103F", keep_scales = FALSE, label_key = Var1)+
+  ylab("DMY")+
+  xlab("Days")+
+  #transition_manual(frames = Var2, cumulative = TRUE) +
+  scale_x_continuous(breaks = c(unique(pred$Days)),expand = expansion(mult = 0.15))+
+  theme_bw()
+```
+
+
+```{r}
+leg_coef = Coef_g%*%lambda
+leg_coef_fix = Coef_fix%*%lambda_fixed
+```
+
+
+
+
+```{r}
+#####Computing area under the curve#######
+A = list()
+for (i in 1:182){   
+  A[[i]]= paste0("function(x){",leg_coef[i,1], "+", 
+                 leg_coef[i,2],"*x +", 
+                 leg_coef[i,3],"*x^2 +", 
+                 leg_coef[i,4],"*x^3+",
+                 leg_coef_fix[1,1], "+",
+                 leg_coef_fix[1,2], "*x +",
+                 leg_coef_fix[1,3], "*x^2 +",
+                 leg_coef_fix[1,4], "*x^3}")
+}
+
+
+
+Area = matrix(0,182,1)
+
+
+for(i in 1:182){
+Area[i] = (integral(eval
+          (parse
+           (text = paste0
+             (A[[i]]
+               )
+             )
+           ), xmin= -1, xmax = 1
+         ))
+}
+
+      
+```
+
+```{r}
+Coefs$Area = Area
+```
+
+
+```{r}
+Coefs[order(Coefs$Area, decreasing = TRUE),]
+```
+
+
+
+```{r}
+CV = function(s,m){(s/m)*100}
+m = aggregate(value ~ Var1, FUN = mean, data = ID_curve_melt)$value[1:182]
+s = aggregate(value ~ Var1, FUN = sd, data = ID_curve_melt)$value[1:182]
+CV(s,m)
+Coefs$stability = CV(s,m)
+hist(Coefs$stability)
+#write.csv(Coefs, "T1_param_RR.csv")
+```
+
+```{r}
+label = Coefs[order(Coefs$Area,decreasing = TRUE),]$Genotype[1:18]
+label = c(label, "UF2015","FL99","B_805")
+```
+
+```{r}
+a = ggplot(Coefs, aes(x = stability, y = Area))+
+  geom_point(size = 1.5, alpha = 0.7)+
+  scale_color_viridis()+
+  geom_text_repel(data =  Coefs[Coefs$Genotype%in%label,], 
+                  aes(x = stability, y = Area, label = Genotype), 
+                  arrow = arrow(length = unit(0.01, 'npc')),color = "black",size = 3)+
+  geom_vline(xintercept = mean(Coefs$stability))+
+  geom_hline(yintercept = mean(Coefs$Area))+
+  xlab("Stability (CVc)")+
+  ylab("Adaptability (A)")+
+  annotate("label",x = 70, y = 5000, label = expression(~rho == -0.55))+
+  scale_x_continuous(breaks = seq(25,85,10), limits = c(25,85))+
+  theme_bw()
+
+b = ggplot(Coefs, aes(x = Area))+
+  geom_histogram(fill = "blue", color = "black", alpha = 0.7)+
+  xlab("Adaptability (A)")+
+  theme_bw()
+
+c = ggplot(Coefs, aes(x = stability))+
+  geom_histogram(fill = "blue", color = "black", alpha = 0.7)+
+  xlab("Stability (CVc)")+
+  theme_bw()
+bc = cowplot::plot_grid(b,c, labels = c("B","C"))
+
+plot_grid(a,bc, labels = "A", nrow = 2, ncol = 1)
+```
+
+
+
+```{r}
+vg_smooth = diag(phi_smooth%*%K%*%t(phi_smooth))
+```
+
+
+
+```{r}
+H2 = data.frame(Vg = vg_smooth,
+                Ve = 365436.4,
+                Days = Gradient_smooth)
+H2$H2 = H2$Vg/(H2$Vg+H2$Ve)
+mean(H2$H2)
+sd(H2$H2)
+```
+
+```{r}
+ggplot(H2, aes(x = Days, y = H2))+
+  geom_line()+
+  scale_x_continuous(breaks = c(unique(pred$Days)),expand = expansion(mult = 0.15))+
+  ylab("Heritability")+
+  xlab("Harvest time (days)")+
+  theme_bw()
+```
+
+
+```{r}
+values = eigen(K)$values
+K_EV = t(eigen(K)$vectors)
+Eigen_fun = K_EV%*%t(phi_smooth)
+```
+
+```{r}
+colnames(Eigen_fun) = Gradient_smooth
+rownames(Eigen_fun) = c("1st eigen function (74%)",
+                       "2nd eigen function (21%)",
+                       "3rd eigen funcitio (4%)",
+                       "4th eigen function (1%)")
+```
+
+```{r}
+Eigen_fun = melt(Eigen_fun)
+```
+
+```{r}
+ggplot(Eigen_fun, aes(x = Var2, y = value, group = Var1, color = Var1))+
+  geom_line()+
+  ylab("Eigen function value")+
+  xlab("Days")+
+  theme_bw()+
+  theme(legend.position = "bottom",
+          legend.box = "vertical")+
+  guides(linetype = FALSE)+
+  geom_hline(yintercept = 0)+
+  guides(color = guide_legend(title = " ",
+                              nrow = 2))+
+  scale_x_continuous(breaks = c(unique(pred$Days)),expand = expansion(mult = 0.15))
+```
+
+
+
+
+
+
