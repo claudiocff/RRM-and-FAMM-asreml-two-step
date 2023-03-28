@@ -263,9 +263,9 @@ ggplot(cor_melt, aes(x = factor(Var1), y = factor(Var2), fill = value, label = r
 
 
 ```{r}
-fixed = as.data.frame(summary(mod_spats, coef = TRUE)$coef.fixed)
+fixed = as.data.frame(summary(rrm_3, coef = TRUE)$coef.fixed)
 
-BLUP = as.data.frame(summary(mod_spats, coef = TRUE)$coef.random)
+BLUP = as.data.frame(summary(rrm_3, coef = TRUE)$coef.random)
 BLUP[order(BLUP$solution,decreasing = TRUE),]
 ```
 
